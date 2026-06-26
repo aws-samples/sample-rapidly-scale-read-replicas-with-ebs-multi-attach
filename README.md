@@ -12,9 +12,9 @@ This documentation explains the solution, the problem it solves, how every piece
 
 A narrated tour of the problem, the architecture, and the live numbers (~5 min):
 
-https://github.com/aws-samples/sample-rapidly-scale-read-replicas-with-ebs-multi-attach/raw/main/presentation.mp4
+[![Watch the walkthrough](docs/assets/presentation-poster.png)](https://github.com/aws-samples/sample-rapidly-scale-read-replicas-with-ebs-multi-attach/blob/main/presentation.mp4)
 
-<sub>If the player doesn't load, [download/view <code>presentation.mp4</code> directly](presentation.mp4).</sub>
+<sub>▶ Click the image to open the video player. Or [download <code>presentation.mp4</code> directly](presentation.mp4).</sub>
 
 ---
 
