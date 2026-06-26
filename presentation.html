@@ -1,0 +1,684 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Shared-Disk RocksDB · Scale reads without copying data</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.min.css" integrity="sha384-Dr46KTie9PO+A9PQpQhCQbyHHtO5JPdOP/GqwH211yMd0UFagJ/7DC85FvG6s75y" crossorigin="anonymous" />
+    <style>
+      :root {
+        --bg: #0d1117;
+        --surface: #161b22;
+        --surface-muted: #0f141b;
+        --surface-hi: #1c2128;
+        --border: #30363d;
+        --border-strong: #444c56;
+        --text: #e6edf3;
+        --text-muted: #8b949e;
+        --text-faint: #6e7681;
+        --accent: #f0883e;
+        --green: #3fb950;
+        --red: #f85149;
+        --yellow: #d29922;
+        --blue: #58a6ff;
+        --brand-gradient: linear-gradient(135deg, #f0883e 0%, #f85149 100%);
+        --radius-sm: 6px;
+        --radius-md: 10px;
+        --radius-pill: 999px;
+        --shadow-sm: 0 1px 2px rgba(0,0,0,.4);
+        --shadow-md: 0 8px 26px rgba(0,0,0,.5);
+        --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+      }
+
+      .reveal { font-family: "Inter", system-ui, sans-serif; font-size: 24px; color: var(--text); font-weight: 400; }
+      .reveal-viewport { background: var(--bg); }
+      .reveal h1, .reveal h2, .reveal h3 { color: var(--text); font-weight: 700; letter-spacing: -0.02em; text-transform: none; margin: 0; }
+      .reveal h2 { font-size: 34px; line-height: 1.18; }
+      .reveal p { line-height: 1.5; margin: 0; }
+      .reveal strong { color: var(--text); font-weight: 700; }
+      .reveal em { color: var(--accent); font-style: normal; font-weight: 600; }
+      .reveal a { color: var(--accent); }
+      ::selection { background: rgba(240,136,62,0.3); }
+
+      /* ── slide shell ── */
+      .slide-shell { width: 100%; max-width: 1080px; margin: 0 auto; padding: 10px 0; display: flex; flex-direction: column; gap: 16px; text-align: left; }
+      .slide-eyebrow { font-family: var(--mono); font-size: 13px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted); display: flex; align-items: center; gap: 10px; }
+      .slide-eyebrow .num { font-weight: 700; background: var(--brand-gradient); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+      .slide-lead { font-size: 19px; color: var(--text-muted); line-height: 1.5; max-width: 920px; }
+
+      .reveal section.has-edge::before { content: ""; position: fixed; top: 0; bottom: 0; left: 0; width: 4px; background: var(--brand-gradient); opacity: 0.9; }
+
+      /* ── cards ── */
+      .card-grid { display: grid; gap: 14px; }
+      .card-grid.two { grid-template-columns: 1fr 1fr; }
+      .card-grid.three { grid-template-columns: repeat(3, 1fr); }
+      .card-grid.four { grid-template-columns: repeat(2, 1fr); }
+      .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 16px 20px; box-shadow: var(--shadow-sm); position: relative; }
+      .card.brand-edge::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; border-radius: var(--radius-md) 0 0 var(--radius-md); background: var(--brand-gradient); }
+      .card-title { font-size: 18px; font-weight: 700; margin: 0 0 6px; display: flex; align-items: center; gap: 9px; }
+      .card-body { font-size: 15.5px; color: var(--text-muted); line-height: 1.5; }
+      .card-body b { color: var(--text); font-weight: 600; }
+
+      /* ── tinted chips ── */
+      .tag { display: inline-flex; align-items: center; line-height: 1.2; font-family: var(--mono); font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; padding: 4px 10px; border-radius: var(--radius-pill); background: var(--surface-muted); color: var(--text-muted); border: 1px solid var(--border); }
+      .tag.accent { background: rgba(240,136,62,0.12); color: var(--accent); border-color: rgba(240,136,62,0.32); }
+      .tag.ok { background: rgba(63,185,80,0.12); color: var(--green); border-color: rgba(63,185,80,0.32); }
+      .tag.warn { background: rgba(210,153,34,0.12); color: var(--yellow); border-color: rgba(210,153,34,0.32); }
+      .tag.danger { background: rgba(248,81,73,0.12); color: var(--red); border-color: rgba(248,81,73,0.32); }
+      .tag.info { background: rgba(88,166,255,0.12); color: var(--blue); border-color: rgba(88,166,255,0.32); }
+
+      /* ── stat row ── */
+      .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+      .stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 18px 18px; box-shadow: var(--shadow-sm); }
+      .stat .v { font-family: var(--mono); font-size: 32px; font-weight: 700; background: var(--brand-gradient); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; line-height: 1.05; }
+      .stat .l { font-size: 13.5px; color: var(--text-muted); margin-top: 6px; line-height: 1.35; }
+
+      /* ── steps ── */
+      .steps { display: flex; flex-direction: column; gap: 11px; }
+      .step { display: grid; grid-template-columns: 48px 1fr; gap: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 13px 18px; box-shadow: var(--shadow-sm); align-items: center; }
+      .step-num { font-family: var(--mono); font-size: 26px; font-weight: 700; background: var(--brand-gradient); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; text-align: center; }
+      .step-body { font-size: 15.5px; color: var(--text-muted); line-height: 1.45; }
+      .step-body b { color: var(--text); font-weight: 600; }
+
+      /* ── title slide ── */
+      .title-wrap { display: flex; flex-direction: column; gap: 22px; align-items: flex-start; max-width: 980px; margin: 0 auto; text-align: left; }
+      .brandmark { display: inline-flex; align-items: center; gap: 12px; font-family: var(--mono); font-weight: 700; font-size: 15px; letter-spacing: 0.04em; color: var(--text); }
+      .brandmark .dot { width: 12px; height: 12px; border-radius: 3px; background: var(--brand-gradient); box-shadow: 0 0 16px rgba(240,136,62,0.6); }
+      .title-wrap h1 { font-size: 56px; line-height: 1.06; letter-spacing: -0.03em; }
+      .title-wrap h1 .g { background: var(--brand-gradient); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+      .title-sub { font-size: 21px; color: var(--text-muted); line-height: 1.5; max-width: 820px; }
+      .chip-row { display: flex; gap: 10px; flex-wrap: wrap; }
+
+      /* ── code-ish caption window ── */
+      .win { border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; box-shadow: var(--shadow-md); background: var(--bg); }
+      .win-bar { display: flex; align-items: center; gap: 10px; padding: 9px 14px; background: var(--surface); border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 12.5px; color: var(--text-muted); }
+      .win-dots { display: inline-flex; gap: 6px; }
+      .win-dots span { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+      .win-dots span:nth-child(1){ background:#f85149; } .win-dots span:nth-child(2){ background:#d29922; } .win-dots span:nth-child(3){ background:#3fb950; }
+
+      /* ════ TUI MOCK ════ */
+      .tui { font-family: var(--mono); font-size: 12.5px; line-height: 1.5; background: var(--bg); color: var(--text); }
+      .tui .hdr { display: flex; align-items: stretch; background: var(--surface); border-bottom: 1px solid var(--border); height: 34px; }
+      .tui .hdr .t { font-weight: 700; color: var(--text); padding: 0 16px; display: flex; align-items: center; }
+      .tui .hdr .region { color: var(--accent); padding: 0 14px; display: flex; align-items: center; border-left: 1px solid var(--border); border-right: 1px solid var(--border); font-weight: 600; }
+      .tui .hdr .meta { color: var(--text-muted); padding: 0 14px; display: flex; align-items: center; gap: 14px; flex: 1; }
+      .tui .meta b { color: var(--text-muted); font-weight: 600; }
+      .tui .sect { color: var(--text-muted); font-weight: 700; background: var(--surface); border-left: 3px solid var(--accent); padding: 3px 14px; letter-spacing: 0.04em; }
+      .tui .body { display: flex; }
+      .tui table { width: 100%; border-collapse: collapse; }
+      .tui thead td { background: var(--surface); color: var(--text-muted); font-weight: 700; padding: 5px 12px; border-bottom: 1px solid var(--border); }
+      .tui tbody td { padding: 4px 12px; white-space: nowrap; }
+      .tui tbody tr:nth-child(odd){ background: var(--surface-muted); }
+      .tui tbody tr.cur td { background: var(--surface-hi); }
+      .tui .w { color: var(--green); font-weight: 700; }
+      .tui .r { color: var(--accent); }
+      .tui .ok { color: var(--green); }
+      .tui .warn { color: var(--yellow); }
+      .tui .err { color: var(--red); }
+      .tui .muted { color: var(--text-muted); }
+      .tui .faint { color: var(--text-faint); }
+      .tui .graph { border-left: 1px solid var(--border); padding: 6px 10px; color: var(--accent); white-space: pre; background: var(--bg); }
+      .tui .graph .gh { color: var(--accent); font-weight: 700; }
+      .tui .graph .ax { color: var(--border-strong); }
+      .tui .strip { display: flex; border-top: 1px solid var(--border); }
+      .tui .vol { width: 250px; border-right: 1px solid var(--border); padding: 8px 12px; }
+      .tui .vol .row { display: flex; justify-content: space-between; padding: 1px 0; }
+      .tui .boxes { flex: 1; display: grid; grid-template-columns: repeat(5,1fr); gap: 8px; padding: 8px 10px; }
+      .tui .box { border: 1px solid var(--border); background: var(--surface); border-radius: 4px; padding: 6px 8px; }
+      .tui .box .bl { color: var(--text-muted); font-size: 11px; }
+      .tui .box .bv { color: var(--accent); font-weight: 700; font-size: 17px; margin-top: 4px; }
+      .tui .log { border-top: 1px solid var(--border); padding: 7px 14px; min-height: 56px; }
+      .tui .log div { padding: 1px 0; }
+      .tui .cmd { display: flex; gap: 8px; align-items: center; background: var(--surface); border-top: 1px solid var(--border); padding: 6px 14px; }
+      .tui .cmd .p { color: var(--green); font-weight: 700; }
+      .tui .cmd .i { color: var(--text); }
+      .tui .cmd .cur { background: var(--text); color: var(--bg); }
+      .tui .foot { display: flex; gap: 16px; background: var(--surface); border-top: 1px solid var(--border); padding: 4px 14px; color: var(--text-muted); }
+      .tui .foot b { background: var(--border); color: var(--accent); padding: 0 6px; border-radius: 3px; font-weight: 700; }
+      .tui-cap { font-family: var(--mono); font-size: 12px; color: var(--text-muted); margin-top: 10px; text-align: center; }
+
+      /* svg helpers */
+      .diagram { width: 100%; }
+      .lbl { font-family: var(--mono); font-size: 12px; fill: var(--text-muted); }
+      .lbl-strong { font-family: "Inter", sans-serif; font-size: 14px; font-weight: 700; fill: var(--text); }
+      .seq-cap { font-family: var(--mono); font-size: 11.5px; fill: var(--text-muted); }
+
+      .reveal .controls { color: var(--accent); }
+      .reveal .progress { color: var(--accent); height: 3px; }
+      .reveal .slide-number { background: transparent; color: var(--text-faint); font-family: var(--mono); }
+      .footnote { font-size: 12.5px; color: var(--text-faint); font-family: var(--mono); }
+    </style>
+  </head>
+  <body>
+    <div class="reveal">
+      <div class="slides">
+
+        <!-- 1 · TITLE -->
+        <section class="has-edge">
+          <aside class="notes">
+            The goal: scale read replicas without copying any data. Instead of duplicating the dataset to every replica, we keep one physical copy on a shared volume and let up to 16 machines read it — measured at 242 thousand reads a second on AWS with RocksDB. Let's start with why this is hard.
+          </aside>
+          <div class="slide-shell">
+            <div class="title-wrap">
+              <div class="brandmark"><span class="dot"></span> EBS MULTI-ATTACH · SHARED-DISK READ REPLICAS</div>
+              <h1>Scale read replicas <span class="g">without copying<br/>a single byte</span> of data.</h1>
+              <p class="title-sub">One physical copy of your data on a shared EBS Multi-Attach volume, read in parallel by up to 16 machines. A new read replica serves traffic in ~5 minutes whether the dataset is 1&nbsp;GB or 1&nbsp;TB. Shown here with RocksDB — the blueprint generalizes to other read-heavy stores.</p>
+              <div class="chip-row">
+                <span class="tag warn">proof of concept</span>
+                <span class="tag accent">EBS Multi-Attach</span>
+                <span class="tag accent">GFS2 cluster FS</span>
+                <span class="tag accent">RocksDB example</span>
+                <span class="tag ok">~242K reads/sec · 0 errors</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 2 · PROBLEM -->
+        <section class="has-edge">
+          <aside class="notes">
+            Normally, scaling reads means replicating or sharding — and both copy the dataset everywhere and keep the copies in sync forever. RocksDB makes the pain obvious: one process, one exclusive lock on its files. So the real question is: what if we didn't copy at all?
+          </aside>
+          <div class="slide-shell">
+            <div class="slide-eyebrow"><span class="num">01</span>The problem</div>
+            <h2>Scaling reads usually means copying data.</h2>
+            <p class="slide-lead">When read traffic outgrows one box, the usual fixes — replicate or shard — copy the dataset to every replica and keep the copies in sync forever. RocksDB makes the pain concrete: an <em>embedded</em> key-value store, a library inside one process, holding an exclusive lock on its files.</p>
+            <div class="card-grid three">
+              <div class="card brand-edge">
+                <div class="card-title">Single process</div>
+                <div class="card-body">No network server, no built-in way for another machine to read the data. It lives and dies with one process on one host.</div>
+              </div>
+              <div class="card brand-edge">
+                <div class="card-title">Single writer lock</div>
+                <div class="card-body">Opening read-write takes an exclusive OS lock on the directory. <b>Exactly one</b> process, anywhere, can hold it.</div>
+              </div>
+              <div class="card brand-edge">
+                <div class="card-title">Scaling means copying</div>
+                <div class="card-body">Replicate (N full copies, kept in sync forever) or shard (routing layer + rebalancing). Both move data and add moving parts.</div>
+              </div>
+            </div>
+            <p class="footnote">Replication time grows with dataset size · storage cost grows linearly with replicas.</p>
+          </div>
+        </section>
+
+        <!-- 3 · THE SHIFT -->
+        <section class="has-edge">
+          <aside class="notes">
+            The reframe: every machine reads the same files. EBS Multi-Attach shares one volume across 16 instances, GFS2 lets them all mount it safely, and RocksDB secondaries read it lock-free, catching up every ten milliseconds. So adding a reader adds compute and cache, not storage. What does that buy us?
+          </aside>
+          <div class="slide-shell">
+            <div class="slide-eyebrow"><span class="num">02</span>The reframing</div>
+            <h2>What if every machine read the <em>exact same files</em>?</h2>
+            <p class="slide-lead">Not a copy per replica — one physical copy, visible to the whole fleet at once. Three capabilities make that safe.</p>
+            <div class="card-grid three">
+              <div class="card">
+                <div class="card-title"><span class="tag accent">AWS</span> EBS Multi-Attach</div>
+                <div class="card-body">One io2 volume attaches to up to <b>16 EC2 instances</b> simultaneously. Every instance sees the same block device.</div>
+              </div>
+              <div class="card">
+                <div class="card-title"><span class="tag info">Linux</span> GFS2</div>
+                <div class="card-body">A cluster filesystem built for many machines mounting one disk with <b>coherent, real-time</b> file visibility — where ext4/XFS would corrupt instantly.</div>
+              </div>
+              <div class="card">
+                <div class="card-title"><span class="tag accent">RocksDB</span> Secondaries</div>
+                <div class="card-body">Open the same directory read-only, <b>no writer lock</b>, and call <span style="font-family:var(--mono);color:var(--text)">TryCatchUpWithPrimary()</span> every ~10&nbsp;ms.</div>
+              </div>
+            </div>
+            <div class="card" style="background:var(--surface-muted)">
+              <div class="card-body"><b style="color:var(--accent)">The result:</b> 1 writer + up to 15 readers, all reading one disk. Adding a reader adds <b>compute and cache — not storage</b>. There is still only one copy of the data. <b>RocksDB is the example</b>; the EBS Multi-Attach + cluster-FS blueprint applies to any read-heavy store with a read-only / follower open path.</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 4 · HIGHLIGHTS -->
+        <section class="has-edge">
+          <aside class="notes">
+            Four wins: a new reader is live in about five minutes at any data size, storage stays flat, throughput scales nearly linearly — fifteen thousand reads a second on one node up to 242 thousand on sixteen — and readers stay about ten milliseconds fresh. Here's how it's wired together.
+          </aside>
+          <div class="slide-shell">
+            <div class="slide-eyebrow"><span class="num">03</span>Why it matters</div>
+            <h2>Read scale-out that doesn't grow with your data.</h2>
+            <div class="card-grid four">
+              <div class="card brand-edge">
+                <div class="card-title">Onboarding is constant-time</div>
+                <div class="card-body">A new reader is live in <b>~5 minutes</b> — 1&nbsp;GB or 1&nbsp;TB, same time. No dataset copy.</div>
+              </div>
+              <div class="card brand-edge">
+                <div class="card-title">Storage cost is flat</div>
+                <div class="card-body">One volume, not one-per-replica. 1&nbsp;TB across 16 readers is still <b>1&nbsp;TB</b>.</div>
+              </div>
+              <div class="card brand-edge">
+                <div class="card-title">Throughput scales with nodes</div>
+                <div class="card-body">Read capacity grows ~linearly: each node serves reads from its <b>own CPU + cache</b> over the one shared copy. ~15K reads/sec on 1 node → <b>~242K on 16</b> (~16×), zero errors.</div>
+              </div>
+              <div class="card brand-edge">
+                <div class="card-title">Fresh + elastic</div>
+                <div class="card-body">Readers catch up in <b>~10&nbsp;ms</b>; a new reader is live in <b>~5&nbsp;min</b>; promote a reader to writer in <b>~1.5&nbsp;min</b>.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 5 · ARCHITECTURE -->
+        <section class="has-edge">
+          <aside class="notes">
+            The whole system: a load balancer fans reads across every node — reads only; writes and admin are blocked. One writer, many read-only secondaries, all mounting one GFS2 filesystem over a single volume. The cluster software underneath keeps it safe, off the data path. Let's see it as layers.
+          </aside>
+          <div class="slide-shell">
+            <div class="slide-eyebrow"><span class="num">04</span>Architecture</div>
+            <h2>One load balancer, one disk, one copy of the data.</h2>
+            <svg class="diagram" viewBox="0 0 1080 540" role="img" aria-label="Architecture diagram">
+              <defs>
+                <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6e7681"/></marker>
+              </defs>
+              <!-- ALB -->
+              <rect x="340" y="18" width="400" height="56" rx="10" fill="#161b22" stroke="#30363d"/>
+              <text x="540" y="42" text-anchor="middle" class="lbl-strong">Application Load Balancer</text>
+              <text x="540" y="61" text-anchor="middle" class="lbl">:80 → :8080 on every node · reads only (/get · /scan) · health: GET /health</text>
+              <!-- arrows to nodes -->
+              <line x1="430" y1="74" x2="150" y2="148" stroke="#30363d" stroke-width="1.5" marker-end="url(#ar)"/>
+              <line x1="500" y1="74" x2="400" y2="148" stroke="#30363d" stroke-width="1.5" marker-end="url(#ar)"/>
+              <line x1="580" y1="74" x2="650" y2="148" stroke="#30363d" stroke-width="1.5" marker-end="url(#ar)"/>
+              <line x1="650" y1="74" x2="900" y2="148" stroke="#30363d" stroke-width="1.5" marker-end="url(#ar)"/>
+              <!-- nodes -->
+              <g>
+                <rect x="45" y="150" width="200" height="106" rx="9" fill="#161b22" stroke="#30363d"/>
+                <rect x="45" y="150" width="4" height="106" rx="2" fill="#3fb950"/>
+                <text x="64" y="178" class="lbl-strong" fill="#3fb950">WRITER</text>
+                <text x="64" y="202" class="lbl">:8080 REST</text>
+                <text x="64" y="222" class="lbl">RocksDB read/write</text>
+                <text x="64" y="242" class="lbl">+ cluster watcher</text>
+              </g>
+              <g>
+                <rect x="295" y="150" width="200" height="106" rx="9" fill="#161b22" stroke="#30363d"/>
+                <rect x="295" y="150" width="4" height="106" rx="2" fill="#f0883e"/>
+                <text x="314" y="178" class="lbl-strong" fill="#f0883e">READER 1</text>
+                <text x="314" y="202" class="lbl">:8080 REST</text>
+                <text x="314" y="222" class="lbl">RocksDB secondary</text>
+                <text x="314" y="242" class="lbl">catch-up ~10 ms</text>
+              </g>
+              <g>
+                <rect x="545" y="150" width="200" height="106" rx="9" fill="#161b22" stroke="#30363d"/>
+                <rect x="545" y="150" width="4" height="106" rx="2" fill="#f0883e"/>
+                <text x="564" y="178" class="lbl-strong" fill="#f0883e">READER 2</text>
+                <text x="564" y="202" class="lbl">:8080 REST</text>
+                <text x="564" y="222" class="lbl">RocksDB secondary</text>
+                <text x="564" y="242" class="lbl">catch-up ~10 ms</text>
+              </g>
+              <g>
+                <rect x="795" y="150" width="200" height="106" rx="9" fill="#161b22" stroke="#30363d"/>
+                <rect x="795" y="150" width="4" height="106" rx="2" fill="#f0883e"/>
+                <text x="814" y="178" class="lbl-strong" fill="#f0883e">READER N</text>
+                <text x="814" y="202" class="lbl">:8080 REST</text>
+                <text x="814" y="222" class="lbl">up to 15 readers</text>
+                <text x="814" y="242" class="lbl">catch-up ~10 ms</text>
+              </g>
+              <!-- node to GFS2 -->
+              <line x1="145" y1="256" x2="145" y2="318" stroke="#30363d" stroke-width="1.5"/>
+              <line x1="395" y1="256" x2="395" y2="318" stroke="#30363d" stroke-width="1.5"/>
+              <line x1="645" y1="256" x2="645" y2="318" stroke="#30363d" stroke-width="1.5"/>
+              <line x1="895" y1="256" x2="895" y2="318" stroke="#30363d" stroke-width="1.5"/>
+              <!-- GFS2 bar -->
+              <rect x="45" y="318" width="950" height="40" rx="8" fill="rgba(88,166,255,0.10)" stroke="rgba(88,166,255,0.4)"/>
+              <text x="520" y="343" text-anchor="middle" class="lbl-strong" fill="#58a6ff">GFS2 cluster filesystem — mounted at /data/rocksdb on every node simultaneously</text>
+              <!-- GFS2 to EBS -->
+              <line x1="520" y1="358" x2="520" y2="402" stroke="#30363d" stroke-width="1.5" marker-end="url(#ar)"/>
+              <!-- EBS -->
+              <rect x="300" y="404" width="440" height="58" rx="10" fill="rgba(240,136,62,0.10)" stroke="rgba(240,136,62,0.45)"/>
+              <text x="520" y="428" text-anchor="middle" class="lbl-strong" fill="#f0883e">io2 Block Express · Multi-Attach · 1000 GiB · 256K IOPS</text>
+              <text x="520" y="448" text-anchor="middle" class="lbl">ONE physical copy of the data</text>
+              <!-- coordination plane -->
+              <text x="520" y="500" text-anchor="middle" class="seq-cap">coordination plane (off the data path): Corosync → Pacemaker → DLM → GFS2 · fence_aws (STONITH via EC2 API) · SSM Parameter Store</text>
+            </svg>
+          </div>
+        </section>
+
+        <!-- 6 · FOUR LAYERS -->
+        <section class="has-edge">
+          <aside class="notes">
+            As a stack: shared block storage at the bottom, the GFS2 cluster filesystem above it, then the coordination layer for membership and fencing, and RocksDB on top. Each layer depends on the one below. So how does a write actually reach the readers?
+          </aside>
+          <div class="slide-shell">
+            <div class="slide-eyebrow"><span class="num">05</span>The stack</div>
+            <h2>Four layers, each depending on the one below it.</h2>
+            <p class="slide-lead">Boot order follows the dependency: Corosync → Pacemaker → DLM → GFS2 mount → RocksDB service.</p>
+            <div class="steps">
+              <div class="step"><div class="step-num">4</div><div class="step-body"><b>Database &amp; API</b> — one writer, many read-only followers, exposed over HTTP. <span class="muted">RocksDB primary/secondary + a C++ REST service on :8080.</span></div></div>
+              <div class="step"><div class="step-num">3</div><div class="step-body"><b>Cluster coordination</b> — keeps membership, locks &amp; fencing correct as nodes come and go. <span class="muted">Corosync, Pacemaker, fence_aws.</span></div></div>
+              <div class="step"><div class="step-num">2</div><div class="step-body"><b>Cluster filesystem</b> — one disk <em>safely</em> mountable by 16 machines with coherent real-time visibility. <span class="muted">GFS2 + DLM.</span></div></div>
+              <div class="step"><div class="step-num">1</div><div class="step-body"><b>Shared block storage</b> — one disk visible to 16 machines. <span class="muted">EBS io2 Multi-Attach.</span></div></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 7 · DATA FLOW (sequence) -->
+        <section class="has-edge">
+          <aside class="notes">
+            The key to freshness: the writer flushes a new file to the shared disk, and readers re-read those physically identical files — no network replication — catching up in about ten milliseconds. Same bytes, no copy. And since reads spread across the fleet, the fleet has to flex in size.
+          </aside>
+          <div class="slide-shell">
+            <div class="slide-eyebrow"><span class="num">06</span>Data flow</div>
+            <h2>A write reaches every reader in about ten milliseconds.</h2>
+            <p class="slide-lead">No network replication of data — readers re-read the writer's <em>physically identical</em> files on the shared filesystem.</p>
+            <svg class="diagram" viewBox="0 0 1080 440" role="img" aria-label="Write to catch-up sequence">
+              <defs>
+                <marker id="sar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker>
+              </defs>
+              <!-- actor cards -->
+              <g>
+                <rect x="45" y="16" width="150" height="44" rx="8" fill="#161b22" stroke="#30363d"/><text x="120" y="43" text-anchor="middle" class="lbl-strong">Client</text>
+                <rect x="325" y="16" width="150" height="44" rx="8" fill="#161b22" stroke="#3fb950"/><text x="400" y="43" text-anchor="middle" class="lbl-strong" fill="#3fb950">Writer</text>
+                <rect x="605" y="16" width="150" height="44" rx="8" fill="#161b22" stroke="rgba(88,166,255,0.5)"/><text x="680" y="43" text-anchor="middle" class="lbl-strong" fill="#58a6ff">GFS2 disk</text>
+                <rect x="885" y="16" width="150" height="44" rx="8" fill="#161b22" stroke="#f0883e"/><text x="960" y="43" text-anchor="middle" class="lbl-strong" fill="#f0883e">Reader</text>
+              </g>
+              <!-- lifelines -->
+              <line x1="120" y1="60" x2="120" y2="400" stroke="#30363d" stroke-dasharray="4 5"/>
+              <line x1="400" y1="60" x2="400" y2="400" stroke="#30363d" stroke-dasharray="4 5"/>
+              <line x1="680" y1="60" x2="680" y2="400" stroke="#30363d" stroke-dasharray="4 5"/>
+              <line x1="960" y1="60" x2="960" y2="400" stroke="#30363d" stroke-dasharray="4 5"/>
+              <!-- 1 -->
+              <line x1="120" y1="110" x2="400" y2="110" stroke="#8b949e" stroke-width="1.8" marker-end="url(#sar)"/>
+              <circle cx="260" cy="110" r="11" fill="#f0883e"/><text x="260" y="114" text-anchor="middle" font-size="12" font-weight="700" fill="#0d1117">1</text>
+              <text x="260" y="98" text-anchor="middle" class="seq-cap">POST /put {"key","value"}</text>
+              <!-- 2 -->
+              <line x1="400" y1="175" x2="680" y2="175" stroke="#8b949e" stroke-width="1.8" marker-end="url(#sar)"/>
+              <circle cx="540" cy="175" r="11" fill="#f0883e"/><text x="540" y="179" text-anchor="middle" font-size="12" font-weight="700" fill="#0d1117">2</text>
+              <text x="540" y="163" text-anchor="middle" class="seq-cap">append WAL + flush new SST</text>
+              <!-- 3 dashed catch-up -->
+              <line x1="680" y1="250" x2="960" y2="250" stroke="#8b949e" stroke-width="1.8" stroke-dasharray="6 5" marker-end="url(#sar)"/>
+              <circle cx="820" cy="250" r="11" fill="#f0883e"/><text x="820" y="254" text-anchor="middle" font-size="12" font-weight="700" fill="#0d1117">3</text>
+              <text x="820" y="238" text-anchor="middle" class="seq-cap">TryCatchUpWithPrimary() · re-read MANIFEST + WAL (~10 ms)</text>
+              <!-- 4 return -->
+              <line x1="960" y1="320" x2="120" y2="320" stroke="#8b949e" stroke-width="1.8" marker-end="url(#sar)"/>
+              <circle cx="540" cy="320" r="11" fill="#f0883e"/><text x="540" y="324" text-anchor="middle" font-size="12" font-weight="700" fill="#0d1117">4</text>
+              <text x="540" y="308" text-anchor="middle" class="seq-cap">any reader returns the fresh value — same physical files, no copy</text>
+              <!-- legend -->
+              <line x1="360" y1="392" x2="400" y2="392" stroke="#8b949e" stroke-width="1.8"/><text x="408" y="396" class="seq-cap">steady-state write / serve</text>
+              <line x1="610" y1="392" x2="650" y2="392" stroke="#8b949e" stroke-width="1.8" stroke-dasharray="6 5"/><text x="658" y="396" class="seq-cap">periodic catch-up (~10 ms)</text>
+            </svg>
+          </div>
+        </section>
+
+        <!-- 8 · ELASTICITY / FAILOVER -->
+        <section class="has-edge">
+          <aside class="notes">
+            Four operations, all while staying available: scale up adds a reader in about five minutes, scale down leaves cleanly, promote fails over in about ninety seconds, and kill triggers fencing plus an automatic replacement. The writer keeps serving throughout. Here's the operator's view.
+          </aside>
+          <div class="slide-shell">
+            <div class="slide-eyebrow"><span class="num">07</span>Elasticity &amp; failover</div>
+            <h2>The fleet changes size while staying available.</h2>
+            <div class="card-grid four">
+              <div class="card">
+                <div class="card-title"><span class="tag ok">scale up</span> Add readers</div>
+                <div class="card-body">Raise ASG desired → boot → tag <span style="font-family:var(--mono)">rocksdb-join</span> → watcher joins it → GFS2 mounts → serving. A single new reader is live in <b>~5 min</b> (mostly EC2 boot); in a bulk scale the writer joins each <b>~40&nbsp;s/node</b> after boot.</div>
+              </div>
+              <div class="card">
+                <div class="card-title"><span class="tag warn">scale down</span> Remove readers</div>
+                <div class="card-body">Lower desired → shutdown hook leaves the cluster cleanly → watcher purges config → journal recovered. <b>~3 min</b> for a full 16→1.</div>
+              </div>
+              <div class="card">
+                <div class="card-title"><span class="tag accent">promote</span> Failover</div>
+                <div class="card-body">Old writer demoted in place; target reader drops the LOCK, reopens read-write, starts the watcher. <b>~1.5 min</b> — data already mounted.</div>
+              </div>
+              <div class="card">
+                <div class="card-title"><span class="tag danger">kill</span> Recover</div>
+                <div class="card-body">Node lost → Corosync detects → Pacemaker fences via EC2 API → journal recovered → ASG relaunches a replacement. <b>~5–7 min</b> — a fresh EC2 boot + rejoin.</div>
+              </div>
+            </div>
+            <p class="footnote">The writer and existing readers stay available throughout a full 1→16 scale-out (~14 min end-to-end).</p>
+          </div>
+        </section>
+
+        <!-- 9 · TUI MOCK · DASHBOARD -->
+        <section class="has-edge">
+          <aside class="notes">
+            It's all driven from one terminal dashboard — live nodes, volume stats, real-time metrics, and a command line for scale, promote, read, write, and stress-test. Let's push it to the limit.
+          </aside>
+          <div class="slide-shell" style="max-width:1140px">
+            <div class="slide-eyebrow"><span class="num">08</span>The operator's view</div>
+            <h2>Drive the whole cluster from one terminal dashboard.</h2>
+            <div class="win">
+              <div class="win-bar"><span class="win-dots"><span></span><span></span><span></span></span> tui.py — RocksDB Cluster Manager</div>
+              <div class="tui">
+                <div class="hdr">
+                  <div class="t">RocksDB Cluster Manager</div>
+                  <div class="region">us-east-1</div>
+                  <div class="meta"><span><b>alb</b> rocksdb-read-1a2b.elb.amazonaws.com</span><span><b>asg</b> RocksDbStack-NodeASG</span></div>
+                </div>
+                <div class="sect">nodes</div>
+                <div class="body">
+                  <table>
+                    <thead><tr><td>Role</td><td>Instance ID</td><td>Private IP</td><td>Public IP</td><td>Svc Health</td><td>ASG Lifecycle</td><td>Node ID</td></tr></thead>
+                    <tbody>
+                      <tr><td class="w">writer</td><td>i-0a1b2c3d4e</td><td>10.0.1.21</td><td>54.81.144.7</td><td class="ok">ok</td><td class="ok">InService</td><td>1</td></tr>
+                      <tr class="cur"><td class="r">reader</td><td>i-0b2c3d4e5f</td><td>10.0.1.34</td><td>54.82.10.55</td><td class="ok">ok</td><td class="ok">InService</td><td>2</td></tr>
+                      <tr><td class="r">reader</td><td>i-0c3d4e5f6a</td><td>10.0.1.47</td><td>54.83.61.12</td><td class="ok">ok</td><td class="ok">InService</td><td>3</td></tr>
+                      <tr><td class="r">reader</td><td>i-0d4e5f6a7b</td><td>10.0.1.58</td><td>18.207.9.31</td><td class="ok">ok</td><td class="ok">InService</td><td>4</td></tr>
+                      <tr><td class="r">reader</td><td>i-0e5f6a7b8c</td><td>10.0.1.62</td><td>18.207.9.84</td><td class="warn">catch-up</td><td class="warn">Pending</td><td class="faint">—</td></tr>
+                    </tbody>
+                  </table>
+                  <div class="graph"><span class="gh"> alb rps  18,420</span><span class="muted">   [1/5] 96pts  [n]◀ [m]▶</span>
+<span class="muted">20k</span> <span class="ax">┤</span>                      ●●●●
+<span class="muted">   </span> <span class="ax">│</span>                 ●●●●●│││││
+<span class="muted">15k</span> <span class="ax">┤</span>            ●●●●│││││││││││
+<span class="muted">   </span> <span class="ax">│</span>       ●●●●●│││││││││││││││
+<span class="muted">10k</span> <span class="ax">┤</span>  ●●●●│││││││││││││││││││││
+<span class="muted">   </span> <span class="ax">│</span>●●│││││││││││││││││││││││││
+<span class="ax">    └───────────────────────────</span>
+<span class="muted">     −8m                     now</span></div>
+                </div>
+                <div class="strip">
+                  <div class="vol">
+                    <div class="row"><span class="muted">volume</span><span>vol-0ab12cd34</span></div>
+                    <div class="row"><span class="muted">size</span><span>1000 GiB</span></div>
+                    <div class="row"><span class="muted">iops</span><span class="ok">256,000</span></div>
+                    <div class="row"><span class="muted">type</span><span>io2 · multi-attach</span></div>
+                    <div class="row"><span class="muted">state</span><span class="ok">in-use</span></div>
+                    <div class="row"><span class="muted">attached</span><span>5 / 16</span></div>
+                  </div>
+                  <div class="boxes">
+                    <div class="box"><div class="bl">alb rps</div><div class="bv">18,420</div></div>
+                    <div class="box"><div class="bl">alb p99 ms</div><div class="bv">2.4</div></div>
+                    <div class="box"><div class="bl">ebs iops</div><div class="bv">41,030</div></div>
+                    <div class="box"><div class="bl">ebs mb/s</div><div class="bv">612</div></div>
+                    <div class="box"><div class="bl">db size</div><div class="bv">84,210</div></div>
+                  </div>
+                </div>
+                <div class="log">
+                  <div><span class="muted">12:04:51</span> <span class="ok">✓</span> cluster healthy — 4/5 online, writer=i-0a1b2c3d4e</div>
+                  <div><span class="muted">12:04:58</span> <span class="warn">join</span> i-0e5f6a7b8c tagged rocksdb-join — watcher adding to corosync…</div>
+                </div>
+                <div class="cmd"><span class="p">›</span><span class="i">scale 8</span><span class="cur">&nbsp;</span></div>
+                <div class="foot"><span><b>ctrl+r</b> Refresh</span><span><b>ctrl+q</b> Quit</span><span class="muted">commands: scale · promote · kill · write · read · scan · stress-test</span></div>
+              </div>
+            </div>
+            <div class="tui-cap">Live nodes table · per-metric ASCII graph (n/m to cycle) · volume panel · CloudWatch metric boxes · command line</div>
+          </div>
+        </section>
+
+        <!-- 10 · TUI MOCK · STRESS AT SCALE -->
+        <section class="has-edge">
+          <aside class="notes">
+            A full run: 16 nodes, 100 gigabytes, 242 thousand reads a second at three-millisecond p99, zero errors. The volume sits well under its IOPS budget — the limit is per-node CPU and cache, which is exactly why adding nodes helps. And one command runs the whole pipeline. Let's total up the numbers.
+          </aside>
+          <div class="slide-shell" style="max-width:1140px">
+            <div class="slide-eyebrow"><span class="num">09</span>At full scale</div>
+            <h2>16 nodes, one disk, ~242K reads/sec — zero errors.</h2>
+            <div class="win">
+              <div class="win-bar"><span class="win-dots"><span></span><span></span><span></span></span> tui.py — stress-test 100gb 16 10</div>
+              <div class="tui">
+                <div class="hdr">
+                  <div class="t">RocksDB Cluster Manager</div>
+                  <div class="region">us-east-1</div>
+                  <div class="meta"><span><b>nodes</b> <span class="ok">16 / 16 online</span></span><span><b>mode</b> <span class="warn">stress-test · +6m30s</span></span></div>
+                </div>
+                <div class="sect">nodes</div>
+                <div class="body">
+                  <table>
+                    <thead><tr><td>Role</td><td>Instance ID</td><td>Private IP</td><td>Svc Health</td><td>ASG Lifecycle</td><td>Node ID</td></tr></thead>
+                    <tbody>
+                      <tr><td class="w">writer</td><td>i-0a1b2c3d4e</td><td>10.0.1.21</td><td class="ok">ok</td><td class="ok">InService</td><td>1</td></tr>
+                      <tr><td class="r">reader</td><td>i-0b2c3d4e5f</td><td>10.0.1.34</td><td class="ok">ok</td><td class="ok">InService</td><td>2</td></tr>
+                      <tr><td class="r">reader</td><td>i-0c3d4e5f6a</td><td>10.0.1.47</td><td class="ok">ok</td><td class="ok">InService</td><td>3</td></tr>
+                      <tr><td class="r">reader</td><td>i-0d4e5f6a7b</td><td>10.0.1.58</td><td class="ok">ok</td><td class="ok">InService</td><td>4</td></tr>
+                      <tr><td colspan="6" class="faint">  + 12 more readers · all ok · all InService · node IDs 5–16</td></tr>
+                    </tbody>
+                  </table>
+                  <div class="graph"><span class="gh"> alb rps  242,118</span><span class="muted"> [1/5] 120pts</span>
+<span class="muted">240k</span><span class="ax">┤</span>              ●●●●●●●●●●
+<span class="muted">    </span><span class="ax">│</span>          ●●●●│││││││││││
+<span class="muted">180k</span><span class="ax">┤</span>       ●●●│││││││││││││││
+<span class="muted">    </span><span class="ax">│</span>     ●●│││││││││││││││││││
+<span class="muted">120k</span><span class="ax">┤</span>   ●●│││││││││││││││││││││
+<span class="muted">    </span><span class="ax">│</span> ●●│││││││││││││││││││││││
+<span class="ax">    └───────────────────────────</span>
+<span class="muted">     −10m                    now</span></div>
+                </div>
+                <div class="strip">
+                  <div class="vol">
+                    <div class="row"><span class="muted">volume</span><span>vol-0ab12cd34</span></div>
+                    <div class="row"><span class="muted">iops</span><span class="warn">198,400 / 256,000</span></div>
+                    <div class="row"><span class="muted">throughput</span><span>2,310 MB/s</span></div>
+                    <div class="row"><span class="muted">state</span><span class="ok">in-use</span></div>
+                    <div class="row"><span class="muted">attached</span><span class="ok">16 / 16</span></div>
+                    <div class="row"><span class="muted">errors</span><span class="ok">0</span></div>
+                  </div>
+                  <div class="boxes">
+                    <div class="box"><div class="bl">alb rps</div><div class="bv">242,118</div></div>
+                    <div class="box"><div class="bl">alb p99 ms</div><div class="bv">3.1</div></div>
+                    <div class="box"><div class="bl">ebs iops</div><div class="bv">198,400</div></div>
+                    <div class="box"><div class="bl">ebs mb/s</div><div class="bv">2,310</div></div>
+                    <div class="box"><div class="bl">db size</div><div class="bv">102,400</div></div>
+                  </div>
+                </div>
+                <div class="log">
+                  <div><span class="muted">12:31:02</span> <span class="warn">── step 4: monitoring (10 min, every 30s) ──</span></div>
+                  <div><span class="muted">+390s</span> nodes=<b style="color:var(--text)">16</b> RPS=<b style="color:var(--accent)">242,118</b> p99=<b style="color:var(--accent)">3.1ms</b> IOPS=<b style="color:var(--accent)">198,400</b> MB/s=<b style="color:var(--accent)">2,310</b></div>
+                  <div><span class="muted">+420s</span> nodes=<b style="color:var(--text)">16</b> RPS=<b style="color:var(--accent)">241,640</b> p99=<b style="color:var(--accent)">3.0ms</b> <span class="ok">errors=0</span></div>
+                </div>
+                <div class="cmd"><span class="p">›</span><span class="i">stress-test 100gb 16 10</span><span class="cur">&nbsp;</span></div>
+                <div class="foot"><span><b>ctrl+r</b> Refresh</span><span><b>ctrl+q</b> Quit</span><span class="muted">preload → scale to 16 → launch loaders → monitor → teardown</span></div>
+              </div>
+            </div>
+            <div class="tui-cap">One command runs the full stress pipeline: preload data · scale to 16 · launch load generators · live monitor · teardown</div>
+          </div>
+        </section>
+
+        <!-- 11 · PROOF -->
+        <section class="has-edge">
+          <aside class="notes">
+            The measured results, not theoretical: 242 thousand reads a second, zero errors, five-minute reader onboarding at any size, ten-millisecond freshness, one copy of the data, and one-to-sixteen scaling in about fourteen minutes. But let's be honest about the trade-offs.
+          </aside>
+          <div class="slide-shell">
+            <div class="slide-eyebrow"><span class="num">10</span>The numbers</div>
+            <h2>Measured, not theoretical.</h2>
+            <div class="stat-grid">
+              <div class="stat"><div class="v">242K</div><div class="l">reads/sec across 16 nodes (warm cache)</div></div>
+              <div class="stat"><div class="v">0</div><div class="l">errors during the full stress run</div></div>
+              <div class="stat"><div class="v">~5 min</div><div class="l">to onboard a new reader — at any data size</div></div>
+              <div class="stat"><div class="v">~10 ms</div><div class="l">reader freshness behind the writer</div></div>
+            </div>
+            <div class="stat-grid">
+              <div class="stat"><div class="v">1×</div><div class="l">copy of the data — for all 16 readers</div></div>
+              <div class="stat"><div class="v">~1.5 min</div><div class="l">promote any reader to writer</div></div>
+              <div class="stat"><div class="v">256K</div><div class="l">provisioned IOPS on one io2 volume</div></div>
+              <div class="stat"><div class="v">1→16</div><div class="l">elastic scale in ~14 min end-to-end (16→1 in ~3 min)</div></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 12 · TRADE-OFFS -->
+        <section class="has-edge">
+          <aside class="notes">
+            This is built for one job — fanning out reads over a large, cacheable dataset, not general-purpose Highly Available infrastructure. The edges: single AZ, one shared volume as a failure domain, a single writer, and a sixteen-node ceiling. Know them before you reach for it. A quick word on security.
+          </aside>
+          <div class="slide-shell">
+            <div class="slide-eyebrow"><span class="num">11</span>Honest trade-offs</div>
+            <h2>Purpose-built for one job — with deliberate limits.</h2>
+            <p class="slide-lead">This fans out reads over a large, cacheable dataset. It is <em>not</em> a general-purpose HA database. Know the edges.</p>
+            <div class="card-grid three">
+              <div class="card"><div class="card-title"><span class="tag danger">AZ</span> Single Availability Zone</div><div class="card-body">Multi-Attach requires all instances in the volume's AZ. No multi-AZ resilience.</div></div>
+              <div class="card"><div class="card-title"><span class="tag danger">blast radius</span> One volume</div><div class="card-body">A single shared volume is a single failure domain for the whole cluster.</div></div>
+              <div class="card"><div class="card-title"><span class="tag warn">writes</span> Single writer</div><div class="card-body">Write throughput does not scale; the writer is the failover point.</div></div>
+              <div class="card"><div class="card-title"><span class="tag warn">ceiling</span> 16 instances</div><div class="card-body">A hard EBS Multi-Attach limit on read fan-out.</div></div>
+              <div class="card"><div class="card-title"><span class="tag warn">shared</span> IOPS budget</div><div class="card-body">All nodes share the volume's provisioned IOPS.</div></div>
+              <div class="card"><div class="card-title"><span class="tag info">ops</span> Cluster stack</div><div class="card-body">Pacemaker/Corosync/DLM/fencing must stay healthy for the shared FS.</div></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 13 · SECURITY -->
+        <section class="has-edge">
+          <aside class="notes">
+            Locked down to the load balancer: the service port is ALB-only, SSH is closed in favor of SSM, and the ALB serves reads but blocks writes and admin. Admin needs a bearer token, IMDSv2 is enforced, and the volume's encrypted. The one honest gap: no TLS yet. Let me wrap up.
+          </aside>
+          <div class="slide-shell">
+            <div class="slide-eyebrow"><span class="num">12</span>Security &amp; hardening</div>
+            <h2>Locked down to the load balancer — admin actions are authenticated.</h2>
+            <p class="slide-lead">Nothing reaches a node directly: the data port is locked to the load balancer, admin endpoints require a token, and operators reach instances only through AWS SSM — no public SSH.</p>
+            <div class="card-grid four">
+              <div class="card brand-edge">
+                <div class="card-title"><span class="tag ok">network</span> Closed perimeter</div>
+                <div class="card-body">Port 8080 is reachable <b>only from the ALB</b> (not the internet); SSH is <b>closed</b> — operators use <b>SSM Session Manager</b>; cluster traffic is scoped to members.</div>
+              </div>
+              <div class="card brand-edge">
+                <div class="card-title"><span class="tag accent">authz</span> Authenticated admin</div>
+                <div class="card-body">Every <span style="font-family:var(--mono)">/admin/*</span> and <span style="font-family:var(--mono)">/cluster/*</span> call needs a <b>bearer token</b> (SSM SecureString, fail-closed). The ALB is a <b>read-only data plane</b> — it returns <b>403</b> for <span style="font-family:var(--mono)">/admin/*</span> and for writes (<span style="font-family:var(--mono)">/put</span>, <span style="font-family:var(--mono)">/delete</span>, …), so only reads are served publicly; writes run on-box via SSM.</div>
+              </div>
+              <div class="card brand-edge">
+                <div class="card-title"><span class="tag info">instance</span> Hardened</div>
+                <div class="card-body"><b>IMDSv2</b> enforced (hop-limit 1); bootstrap inputs <b>validated</b> (no shell injection); secrets in <b>SSM SecureString</b>, wiped on teardown; data volume <b>encrypted at rest</b>; IAM <b>scoped to least privilege</b>; ALB <b>access logs</b> to S3.</div>
+              </div>
+              <div class="card brand-edge">
+                <div class="card-title"><span class="tag warn">honest gap</span> No TLS yet</div>
+                <div class="card-body">Traffic is plaintext HTTP — accepted for the locked-down, in-VPC network. Close it with an ACM cert or a CloudFront front-door when a domain is available.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 14 · CLOSING -->
+        <section class="has-edge">
+          <aside class="notes">
+            The takeaway: add readers, not copies. When reads dominate and the dataset's too big to duplicate, a shared disk makes read scale-out a five-minute, zero-copy operation. Shown with RocksDB, but the blueprint generalizes. Thanks for watching.
+          </aside>
+          <div class="slide-shell">
+            <div class="title-wrap">
+              <div class="brandmark"><span class="dot"></span> ROCKSDB · SHARED-DISK CLUSTER</div>
+              <h1>Add readers, <span class="g">not copies.</span></h1>
+              <p class="title-sub">When reads vastly outnumber writes and the dataset is too big to keep duplicating, a shared disk turns read scale-out into a five-minute, zero-copy operation — driven from one terminal. Demonstrated with RocksDB; the EBS Multi-Attach + cluster-filesystem blueprint applies to other read-heavy stores and use cases.</p>
+              <div class="chip-row">
+                <span class="tag warn">proof of concept</span>
+                <span class="tag accent">1 writer + 15 readers</span>
+                <span class="tag accent">1 physical copy</span>
+                <span class="tag ok">~242K reads/sec</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.min.js" integrity="sha384-E/74jUrFhqOeJLdVLvKMKBmBju3NBLtqcfLP9jMPShByAhZaCpBOEybOoyl8anSD" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.min.js" crossorigin="anonymous"></script>
+    <script>
+      Reveal.initialize({
+        plugins: [ RevealNotes ],
+        hash: true,
+        slideNumber: "c/t",
+        progress: true,
+        controls: true,
+        controlsTutorial: false,
+        center: true,
+        transition: "slide",
+        backgroundTransition: "none",
+        width: 1280,
+        height: 800,
+        margin: 0.04,
+      });
+    </script>
+  </body>
+</html>

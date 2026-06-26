@@ -1,0 +1,30 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+
+# CDK — regenerated per-environment; cdk.context.json caches account-specific lookups
+cdk.out/
+cdk.context.json
+
+# Build / runtime artifacts
+ami_id.txt
+
+# Stress/E2E test output (regenerated at runtime)
+stress-test/results/
+test/results/
+
+# Secrets — never commit private keys
+*.pem
+*.key
+
+# Editor / OS
+.DS_Store
+*.bak
+
+# democast — local video-build tooling, not part of the published sample
+democast-config.json
+democast-macro.json
+democast-README.md
+
+.vscode
