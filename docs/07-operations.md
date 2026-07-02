@@ -194,24 +194,19 @@ If VPC deletion fails because of a leftover `rocksdb-loader-sg` (from stress tes
 
 ## How long things take
 
-Measured on `m5d.2xlarge` in `us-east-1` (2026-06-16 clean full validation run). "Duration" is time until all target nodes are operational — **not** downtime (the writer and existing readers stay up).
+Measured on `m5d.2xlarge` (Corosync `token=30000`). "Duration" is time to **all nodes serving** (ALB-healthy + Corosync-online) — **not** downtime (the writer and existing readers stay up). Adding readers is paced at roughly **~40 s/node**: the watcher joins nodes one at a time — deliberately, since batch joins caused split-brain (see [Troubleshooting](11-troubleshooting.md)) — after an initial ~3 min for the ASG to boot the new instances.
 
 | Operation | Duration | Notes |
 |---|---|---|
-| Scale 1 → 8 | ~7 min | Readers added one at a time |
-| Scale 8 → 3 | ~6.5 min | Scale-down + ghost purge |
-| Scale 3 → 16 | ~17 min | 13 readers added sequentially |
-| Scale 16 → 5 | ~6.5 min | Scale-down + ghost purge |
+| Scale up, full **1 → 16** | ~13–14 min | ~3 min ASG boot, then ~40 s/node; zero token-loss events |
+| Scale down, full **16 → 1** | ~3 min | Clean leave + ghost purge |
 | Recycle whole fleet onto a new AMI (→1) | ~6 min | Terminate all; fresh writer boots + self-configures |
-| Kill 1 reader → recover | ~4.5 min | ASG replacement boots and rejoins |
-| Kill 2 readers back-to-back → recover | ~6.5 min | Both replacements rejoin; no wedge |
-| Promote a reader to writer | ~1.5 min | Demote old + promote new + verify |
+| Kill a reader → recover | ~5–7 min | Dominated by the ASG booting a fresh replacement + rejoin |
+| Promote a reader to writer | ~1–1.5 min | Demote old + promote new + verify |
 | Data op (write / read / scan / delete) | <10 s | Single REST call |
 | Write visible on readers | ~10 ms | Auto-flush + `TryCatchUpWithPrimary` |
 
-Rule of thumb: adding readers is paced at roughly **~40 s/node**, so a full **1→16 ≈ 14 min end-to-end** (the cluster watcher joins nodes one at a time — deliberately, since batch joins caused split-brain; see [Troubleshooting](11-troubleshooting.md)); a full **16→1 ≈ 3 min**. The writer and all surviving readers remain fully available throughout.
-
-> **Measured end-to-end (token=30000, 16× `m5d.2xlarge`, fresh writer).** From issuing the scale command to **all nodes serving** (ALB-healthy + Corosync-online), scale-up is reliable with **zero token-loss events**: full **1→16 ≈ 13–14 min** across three runs (755 s, 779 s, 823 s) — a steady ~40 s/node after the first ~3 min of ASG boot — and **16→1 ≈ 3 min** (173–183 s). **Promote/failover ≈ 1–1.5 min** (measured 1m06s; prior run 1m36s). **Kill→recover ≈ 5–7 min** (measured 7m20s) — recovery is dominated by the ASG booting a fresh replacement and rejoining it. The older per-operation table above predates the token fix and is kept as a reference for partial scales.
+Partial scales follow the same ~40 s/node pace — e.g. `1→8` ≈ 7 min and `3→16` ≈ 17 min on the way up, and scale-downs like `16→5` ≈ 6–7 min including the ghost purge. The writer and all surviving readers remain fully available throughout.
 
 ---
 Next: [The TUI →](08-tui.md)

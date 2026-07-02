@@ -84,13 +84,13 @@ Each step prints timestamps and a `PASS`/`FAIL`, and the readiness waiter prints
 
 which makes it obvious whether nodes are joining steadily (good) or flapping (a problem to investigate). At the end the harness prints a **per-step duration summary**, which is the source of the timings in [Operations](07-operations.md#how-long-things-take).
 
-## The most recent run
+## A full validation run
 
-The latest clean full run passed every step on the fixed AMI — including the two steps that previously failed:
+A representative full run passes every step:
 
 | Step | Result | Duration |
 |---|---|---|
-| Recycle onto the fixed AMI | ✅ | ~6 min (normal) |
+| Recycle onto the current AMI | ✅ | ~6 min (normal) |
 | Scale 1 → 8 | ✅ | 7:04 |
 | Scale 8 → 3 | ✅ | 6:24 |
 | Promote reader → writer (graceful) | ✅ | 1:36 |
@@ -100,13 +100,7 @@ The latest clean full run passed every step on the fixed AMI — including the t
 | Scale 16 → 5 | ✅ | 6:20 |
 | write/read/scan/delete (incl. replication, `ABSENT`, node-ID resolution) | ✅ | <10 s each |
 
-Two real bugs were found and fixed through this testing — surprise auto-reboots causing churn (`Run 1`), and a substring IP-match wedging a joining node (`Run 2`). Both are written up in [Troubleshooting](11-troubleshooting.md).
-
-## A real bug this caught: surprise reboots = membership churn
-
-During scaling, fresh readers appeared to "fail, then rejoin." Investigation (no fencing events, no token loss, clean departures) showed the readers were **rebooting themselves** shortly after joining: `unattended-upgrades` installed a newer kernel on first boot and triggered an automatic OS reboot. Each reboot made the node leave and rejoin the Corosync ring — the churn.
-
-The fix (in `setup_phase2.sh`, baked into the AMI): mask the `apt-daily` timers and `unattended-upgrades`, and disable automatic reboots. After rebuilding the AMI and re-running the full sequence, the churn was gone. Full write-up in [Troubleshooting](11-troubleshooting.md).
+Two real bugs were found and fixed through this testing — surprise auto-reboots causing membership churn, and a substring IP-match wedging a joining node. Both are written up in [Troubleshooting](11-troubleshooting.md).
 
 ---
 Next: [Stress Testing →](10-stress-testing.md)

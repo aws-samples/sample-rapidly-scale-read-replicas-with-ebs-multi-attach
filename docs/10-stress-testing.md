@@ -38,7 +38,7 @@ These shell scripts and the TUI's built-in `stress-test` command perform the sam
 
 Loading billions of keys over HTTP would be far too slow. `sst_generator.cc` writes RocksDB data **directly** on the writer, bypassing the HTTP API. It creates keys like `stress:0000000000000001` with 1 KB values.
 
-> **The current generator writes incompressible (random) values** — every value is unique random bytes, so RocksDB compression has no effect and on-disk size ≈ logical size. (Earlier results below labelled "compressed" were produced by an older generator that wrote repeated-byte values; they're kept as historical data points.)
+> **The generator writes incompressible (random) values** — every value is unique random bytes, so RocksDB compression has no effect and on-disk size ≈ logical size.
 
 Preload throughput with incompressible values: **~232K keys/sec**.
 
@@ -58,7 +58,7 @@ Preload throughput with incompressible values: **~232K keys/sec**.
 
 ## Results
 
-> **Measured 2026-06-17** on a freshly built AMI (`ami-04fe5971a3cab4500`), **16× `m5d.2xlarge`**
+> **Measured** on a freshly built AMI, **16× `m5d.2xlarge`**
 > (1 writer + 15 readers), io2 Multi-Attach volume (1000 GiB, 256K provisioned IOPS), us-east-1.
 > Loaders are `c5.4xlarge` running `wrk -t16 -c1000`. Values are **incompressible** (random bytes),
 > so on-disk size ≈ logical size and reads genuinely hit EBS once the working set exceeds RAM.

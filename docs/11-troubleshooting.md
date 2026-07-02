@@ -19,7 +19,7 @@ A catalogue of the failure modes found during development, their root causes, an
 
 Then rebuild the AMI and recycle nodes. The trade-off: no automatic in-place OS patching — patching is done by rebuilding the AMI and rolling the fleet (the right model for HA cluster nodes, where an uncoordinated reboot looks like a node failure).
 
-**Verification.** A full `scale 1→8→3→promote→16→5` run after the fix showed zero churn — nodes joined one-at-a-time and stayed. (Test log, `2026-06-16 Run 1`.)
+**Verification.** A full `scale 1→8→3→promote→16→5` run after the fix showed zero churn — nodes joined one-at-a-time and stayed.
 
 > **Also: deploy on a freshly built AMI.** The hardening above stops *unattended-upgrades* from rebooting deployed nodes, but a **stale AMI** can still carry a pending OS/kernel update that a node applies and reboots for on first boot — interrupting the writer's cluster bootstrap before it finishes (leaving `rocksdb.service` looping and the watcher unstarted). Rebuilding the AMI bakes in the current kernel, so deployed instances have nothing pending. Rule of thumb: deploy on a recently built image; if reusing an older one, verify a test instance has **no `/var/run/reboot-required`** and **no `linux-image` in `apt list --upgradable`** before trusting it at scale.
 
@@ -61,7 +61,7 @@ These were found while hardening scale-up / scale-down / promote.
 1. **Deadlock-breaker.** If a stale ghost has blocked joins for > `STALE_FORCE_SECS` (120 s) and readers are pending, the watcher adds them anyway. Safe because new node-IDs are always monotonically higher than anything in the runtime list, so *adding* always reloads cleanly — new readers join despite the ghost.
 2. **Writer recycle resets the drift.** The runtime nodelist can only be truly cleared by restarting corosync; on the writer that means recycling it (terminate → ASG relaunches a fresh writer that remounts the data with `runtime = 1`). Recommended periodically for a heavily scale-cycled writer.
 
-The drift's other (worse) consequence — ghosts inflating `expected_votes` and freezing DLM — is covered in issue 8 below. (Earlier docs claimed the drift was "benign"; it is not — left unchecked it loses quorum and freezes I/O. The fixes in issue 8 keep quorum correct despite the ghosts.)
+The drift's other (worse) consequence — ghosts inflating `expected_votes` and freezing DLM — is covered in issue 8 below: left unchecked it loses quorum and freezes I/O, so the fixes in issue 8 keep quorum correct despite the ghosts.
 
 ### 6. GFS2 journal-recovery timeout
 
@@ -83,9 +83,9 @@ The drift's other (worse) consequence — ghosts inflating `expected_votes` and 
 
 **Fix (two complementary mechanisms — keep quorum correct despite ghosts).**
 1. **Last Man Standing** — `last_man_standing: 1` is written into `corosync.conf` **before** `pcs cluster start` (it only engages on a fresh corosync start, not a reload). LMS lets votequorum lower `expected_votes` to the live members as the cluster shrinks *gradually* while staying quorate.
-2. **Watcher pins `expected_votes` to the live member count at three points** — top of every main-loop iteration, **early inside scale-down cleanup** (right after departed nodes are killed from the ring, *before* the slow per-node conf-removal loop), and once at the end of cleanup. The value is **`Total votes` from `corosync-quorumtool -s`** (the node's current membership view), **not** the conf node count and **not** a grep of `corosync-quorumtool -l` (that grep can over-count lingering lines — it once returned 20 with a single node live). The early-in-cleanup pin matters because the main-loop pin can't re-run while the watcher is inside the (minutes-long) cleanup of a `16→1` drop; without it `expected_votes` stays inflated for the whole cleanup window. Together these restore quorum through a **sudden** mass drop like `16→1` and stop a death spiral when the conf can't shrink (LMS alone can't step down through an instant loss of majority; the watcher sets the correct value directly).
+2. **Watcher pins `expected_votes` to the live member count at three points** — top of every main-loop iteration, **early inside scale-down cleanup** (right after departed nodes are killed from the ring, *before* the slow per-node conf-removal loop), and once at the end of cleanup. The value is **`Total votes` from `corosync-quorumtool -s`** (the node's current membership view), **not** the conf node count and **not** a grep of `corosync-quorumtool -l` (that grep can over-count lingering lines). The early-in-cleanup pin matters because the main-loop pin can't re-run while the watcher is inside the (minutes-long) cleanup of a `16→1` drop; without it `expected_votes` stays inflated for the whole cleanup window. Together these restore quorum through a **sudden** mass drop like `16→1` and stop a death spiral when the conf can't shrink (LMS alone can't step down through an instant loss of majority; the watcher sets the correct value directly).
 
-**Verification.** After `16→1` on the fixed AMI, the writer settles `Quorate: Yes, expected_votes=1` (with `Flags: Quorate LastManStanding`), `dlm_tool status` shows `quorate 1` (not `kern_stop`), `rocksdb_service` stays in `Ssl` (not the unkillable `Ds`/`dlm_lock`), and the previously-hanging preload completes cleanly. *(Earlier docs described the policy as `no-quorum-policy=ignore`; the implementation uses `freeze` + LMS + dynamic `expected_votes`, which is safe and correct.)*
+**Verification.** After `16→1`, the writer settles `Quorate: Yes, expected_votes=1` (with `Flags: Quorate LastManStanding`), `dlm_tool status` shows `quorate 1` (not `kern_stop`), `rocksdb_service` stays in `Ssl` (not the unkillable `Ds`/`dlm_lock`), and the previously-hanging preload completes cleanly.
 
 ### 9. Substring IP match wedges a joining node
 
@@ -199,17 +199,7 @@ sudo cat /var/log/rocksdb-userdata.log
 sudo journalctl -u corosync --no-pager --since "-15min" | grep -iE "membership|left|joined|token"
 ```
 
-## Known limitations (recap)
-
-| Limitation | Detail |
-|---|---|
-| 16 instances max | EBS Multi-Attach hard limit |
-| Single AZ | All instances in the volume's AZ |
-| io2 only | gp2/gp3/st1/sc1 can't Multi-Attach |
-| Fencing required | DLM/GFS2 won't start without STONITH |
-| Single writer | One writer at a time; write throughput doesn't scale |
-| Single failure domain | One volume backs everything |
-| Shared IOPS | All nodes share the volume's provisioned IOPS |
+> The architectural limits and trade-offs (16-node ceiling, single AZ, single volume, single writer, shared IOPS) are covered in [Overview → When to use this](01-overview.md#when-to-use-this-and-when-not-to).
 
 ---
 Next: [API Reference →](12-api-reference.md)
